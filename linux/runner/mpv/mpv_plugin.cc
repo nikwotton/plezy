@@ -106,6 +106,13 @@ struct _MpvPlugin {
   // against the display's current peak so a move between two HDR outputs is not
   // mistaken for no change at all.
   uint32_t applied_target_peak = 0;
+  // Set when a transaction ended in kUnknown: mpv stopped answering partway
+  // through being put back, so what the plane emits cannot be named and the
+  // surface carries no description. Recorded rather than inferred from the
+  // surface being hidden, because Dart's own visibility changes move that bit
+  // for entirely unrelated reasons and would otherwise lift the quarantine by
+  // accident. Cleared by the next transaction that ends in a nameable state.
+  bool hdr_output_unnameable = false;
   // What the source snapshot last logged as, so a seek does not repeat it. Its
   // default state means "no stream", which no real source matches, so the first
   // one always logs. Placement-constructed in init - see the note by finalize.
@@ -214,6 +221,11 @@ static void release_video_resources(MpvPlugin* self) {
   self->hdr_tone_mapping = mpv::HdrToneMapping::kCompositor;
   self->hdr_tone_mapping_desired = mpv::HdrToneMapping::kCompositor;
   self->applied_target_peak = 0;
+  // The quarantine belongs to the mpv instance that stopped answering, not to
+  // the app. A new plane and a new player have said nothing yet, so nothing
+  // about them is unnameable, and leaving this set would hide the next session
+  // outright: the flag suppresses exactly the setVisible that would show it.
+  self->hdr_output_unnameable = false;
   self->last_logged_source = mpv::HdrMetadata();
   // hdr_wanted included, and this is not obvious. It reads like the user's
   // permission, which outlives any one plane - but this plugin is a
@@ -432,9 +444,16 @@ static void apply_hdr_state(MpvPlugin* self, bool allow, mpv::HdrToneMapping mod
               // kApplied left a clean unwind showing black until some unrelated
               // visibility change arrived. Done before the switch so each arm's
               // own render publishes it.
-              const bool unquarantined =
-                  result != Result::kUnknown && self->visible != FALSE && !self->video_surface->visible();
-              if (unquarantined) self->video_surface->SetVisible(true);
+              //
+              // Driven off the recorded quarantine rather than off the surface
+              // being hidden: those are different facts. Dart hides the plane
+              // whenever the player is off screen, and reading that as "quarantined"
+              // would restore visibility the user did not ask for.
+              const bool unquarantined = result != Result::kUnknown && self->hdr_output_unnameable;
+              if (unquarantined) {
+                self->hdr_output_unnameable = false;
+                if (self->visible != FALSE) self->video_surface->SetVisible(true);
+              }
               switch (result) {
                 case Result::kApplied: {
                   // Pixels and state now agree; publish them together.
@@ -491,6 +510,10 @@ static void apply_hdr_state(MpvPlugin* self, bool allow, mpv::HdrToneMapping mod
                 case Result::kUnknown:
                   // Nothing can be said truthfully about these pixels, so nothing is
                   // said and nothing is shown. A later transaction can recover.
+                  // Recorded, so that a setVisible arriving in between - the app
+                  // going off screen and back, which has nothing to do with colour -
+                  // cannot quietly put the mislabelled plane back on screen.
+                  self->hdr_output_unnameable = true;
                   self->video_surface->ForceUndescribed();
                   self->video_surface->SetVisible(false);
                   self->applied_target_peak = 0;
@@ -1036,10 +1059,23 @@ static void mpv_plugin_handle_method_call(FlMethodChannel* channel, FlMethodCall
       self->visible = fl_value_get_bool(visible_value);
 
       if (self->video_surface) {
-        self->video_surface->SetVisible(self->visible);
-        // Becoming visible has to render explicitly: the redraw latch was
-        // consumed (or suppressed) while hidden, so no callback is pending.
-        if (self->visible) render_video_plane(self, TRUE);
+        // Hiding is always Dart's to do. Showing is not, while the plane is
+        // quarantined: the description was withdrawn because what mpv emits
+        // could not be named, and showing it now would be the mislabelled
+        // picture the kUnknown arm just refused. Dart's wish is still recorded
+        // above, so the transaction that lifts the quarantine honours it.
+        if (self->visible && self->hdr_output_unnameable) {
+          // Actively, rather than waiting for an unrelated event: coming back on
+          // screen is exactly when it is worth asking mpv again, and the
+          // transaction either names the output and unhides, or lands on
+          // kUnknown again and leaves things as they are.
+          request_hdr_reapply(self);
+        } else {
+          self->video_surface->SetVisible(self->visible);
+          // Becoming visible has to render explicitly: the redraw latch was
+          // consumed (or suppressed) while hidden, so no callback is pending.
+          if (self->visible) render_video_plane(self, TRUE);
+        }
       }
 
       response = FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
