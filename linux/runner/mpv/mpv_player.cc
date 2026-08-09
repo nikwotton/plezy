@@ -1293,8 +1293,13 @@ void MpvPlayer::RunPendingHdrOutput() {
     hdr_queue_.clear();
     for (auto& request : orphaned) {
       // Nothing was touched, so the previous state - whatever it was - still
-      // stands as far as this request is concerned.
-      if (request.callback) request.callback(HdrOutputResult::kRestored, MPV_ERROR_UNINITIALIZED);
+      // stands as far as this request is concerned. Which is only worth telling
+      // the caller when that state is nameable; if the last unwind gave up
+      // halfway, "unchanged" describes a colour space nobody knows.
+      if (request.callback) {
+        request.callback(
+            output_state_known_ ? HdrOutputResult::kRestored : HdrOutputResult::kUnknown, MPV_ERROR_UNINITIALIZED);
+      }
     }
     return;
   }
@@ -1429,7 +1434,17 @@ void MpvPlayer::RunPendingHdrOutput() {
     // This request's own outcome, to this request's own caller. The result names
     // what mpv is actually in now, which is what decides whether the caller's
     // committed surface description is still true.
-    const HdrOutputResult result = ok ? HdrOutputResult::kApplied : hdr_unwind_result_;
+    //
+    // kRestored says "mpv is where it was", which only reassures the caller while
+    // where it was is known. After an unwind that gave up halfway it is not: a
+    // sequence refused on its very first write unwinds nothing, so it reports the
+    // untouched kRestored while mpv sits in the half-reset state nobody can name.
+    // The caller would read that as "your description still holds" and put an
+    // undescribed plane back on screen. Downgrading to kUnknown is the honest
+    // answer, and a clean apply - the one thing that re-earns the trust - is
+    // reported as kApplied above regardless.
+    const HdrOutputResult result =
+        ok ? HdrOutputResult::kApplied : (output_state_known_ ? hdr_unwind_result_ : HdrOutputResult::kUnknown);
     if (callback) callback(result, error);
     // Whatever arrived while this ran runs now — never alongside.
     RunPendingHdrOutput();

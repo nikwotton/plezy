@@ -366,6 +366,41 @@ void TestAnUnknownOutputStateIsNeverAnsweredFromTheCache() {
   CheckApplied(player, "pq", "bt.2020", "auto", "auto", "a clean apply must leave the cache naming what it wrote");
 }
 
+// A sequence refused on its very first write unwinds nothing - RollbackPropertySequence
+// returns straight back out with nothing to undo - so it reports the untouched
+// kRestored: "mpv is exactly where it was". True, and worthless once where it was
+// is itself unknown. The caller reads kRestored as "the description you committed
+// still holds" and puts the plane back on screen; after an unknown state there is
+// no description, and mpv is in the half-reset colour space the last refusal left.
+// The two mechanisms are each right alone: unwinding nothing really is a clean
+// unwind, and kRestored really does mean the description stands - when the
+// starting point was nameable.
+void TestARefusalAfterAnUnknownStateIsNotReportedAsRestored() {
+  ScriptedCore core;
+  MpvPlayer player;
+  core.Install(player);
+  ApplyPqBaseline(player, core);
+
+  core.RefuseWrite(2);
+  core.RefuseWrite(3);
+  core.RefuseWrite(4);
+  Check(
+      Request(player, SourceTransfer::kSdr, 203).result == MpvPlayer::HdrOutputResult::kUnknown,
+      "the setup for this case is an output state that can no longer be named");
+
+  // The next request's first write, refused. Nothing to unwind, so the unwind
+  // result stays at its clean default - which is the trap.
+  core.RefuseWrite(5);
+  const Outcome outcome = Request(player, SourceTransfer::kPq, 0);
+
+  Check(
+      outcome.result != MpvPlayer::HdrOutputResult::kRestored,
+      "a refusal on top of an unknown output state must not claim mpv was restored");
+  Check(
+      outcome.result == MpvPlayer::HdrOutputResult::kUnknown,
+      "it must stay unknown, so the caller keeps the plane off screen rather than showing it undescribed");
+}
+
 }  // namespace
 }  // namespace mpv
 
@@ -390,6 +425,7 @@ int main() {
     mpv::TestRefusedRollbackForcesSdr();
     mpv::TestRefusedForcedSdrReportsUnknown();
     mpv::TestAnUnknownOutputStateIsNeverAnsweredFromTheCache();
+    mpv::TestARefusalAfterAnUnknownStateIsNotReportedAsRestored();
   } catch (const std::exception& error) {
     g_main_context_pop_thread_default(context);
     g_main_context_unref(context);
