@@ -1183,24 +1183,43 @@ void MpvPlayer::RollbackPropertySequence(
       });
 }
 
+// The one place the applied-output cache is written, so every path that moves a
+// property records it the same way. Matched by name, not position: the order the
+// sequences use is load-bearing and has to stay free to change without silently
+// reassigning the wrong field.
+void MpvPlayer::RecordAppliedOutputProperty(const std::string& name, const std::string& value) {
+  if (name == "target-peak") {
+    applied_target_peak_ = value;
+  } else if (name == "target-prim") {
+    applied_target_prim_ = value;
+  } else if (name == "target-trc") {
+    applied_target_trc_ = value;
+  } else if (name == "tone-mapping") {
+    applied_tone_mapping_ = value;
+  }
+}
+
 void MpvPlayer::ForceSdrOutput(size_t index, int failure, StatusCallback callback) {
   // Same order the apply path uses: the transfer function stops asking for HDR
   // before the primaries, operator and peak follow it back.
   static const char* const kResetOrder[] = {"target-trc", "target-prim", "tone-mapping", "target-peak"};
   constexpr size_t kResetCount = sizeof(kResetOrder) / sizeof(kResetOrder[0]);
   if (index >= kResetCount) {
-    applied_target_trc_ = "auto";
-    applied_target_prim_ = "auto";
-    applied_tone_mapping_ = "auto";
-    applied_target_peak_ = "auto";
     // mpv is SDR now, not back where it started, so any HDR description the
     // caller has already committed is a lie about these pixels.
     hdr_unwind_result_ = HdrOutputResult::kForcedSdr;
+    output_state_known_ = true;
     if (callback) callback(failure);
     return;
   }
   SetPropertyAsync(kResetOrder[index], "auto", [this, index, failure, cb = std::move(callback)](int error) mutable {
     if (plezy::mpv_common::SetPropertyStatusSucceeded(error)) {
+      // Recorded as it lands, not once the whole reset is through. Recording
+      // only at the end would leave the cache naming the pre-reset curve for
+      // every property that did move if a later one is refused, and the no-op
+      // short-circuit would then answer a repeat request from it - committing an
+      // HDR description over pixels mpv had already reset to SDR.
+      RecordAppliedOutputProperty(kResetOrder[index], "auto");
       ForceSdrOutput(index + 1, failure, std::move(cb));
       return;
     }
@@ -1209,6 +1228,12 @@ void MpvPlayer::ForceSdrOutput(size_t index, int failure, StatusCallback callbac
     // disposed. Either way what it emits is now unknowable, and the
     // caller must stop presenting the plane rather than guess.
     hdr_unwind_result_ = HdrOutputResult::kUnknown;
+    // And the cache is now a record of what we *asked* for, not what mpv holds:
+    // some of the reset landed and some did not. Marking it untrusted is what
+    // stops the short-circuit skipping a later write on the strength of it. The
+    // strings are left alone deliberately - they are still the best rollback
+    // targets available if a later sequence gets that far.
+    output_state_known_ = false;
     g_warning(
         "MPV: output colour space is no longer commandable; what the plane emits "
         "is unknown");
@@ -1359,8 +1384,13 @@ void MpvPlayer::RunPendingHdrOutput() {
   // path the call is a real recursion rather than a fresh stack, which is fine
   // because the plugin coalesces reapplies into a single pending flag: the queue
   // holds the one in flight plus at most one waiting.
-  if (applied_target_trc_ == curve && applied_target_prim_ == primaries && applied_tone_mapping_ == operator_name &&
-      applied_target_peak_ == peak) {
+  // output_state_known_ first: the comparison is only meaningful while the cache
+  // is a record of what mpv holds. A forced-SDR reset that was itself refused
+  // partway leaves it a record of what was *asked* for, and skipping on that
+  // would report kApplied for a colour space mpv is not in - which the caller
+  // then commits an image description against.
+  if (output_state_known_ && applied_target_trc_ == curve && applied_target_prim_ == primaries &&
+      applied_tone_mapping_ == operator_name && applied_target_peak_ == peak) {
     if (request.callback) request.callback(HdrOutputResult::kApplied, 0);
     RunPendingHdrOutput();
     return;
@@ -1388,19 +1418,13 @@ void MpvPlayer::RunPendingHdrOutput() {
     // already unwound, and the unwinding updated these itself if it had to force
     // SDR.
     if (ok && !disposed_) {
-      // Matched by name, not position: the order above is load-bearing and has
-      // to stay free to change without silently reassigning the wrong field.
       for (const PropertyChange& change : *changes) {
-        if (change.name == "target-peak") {
-          applied_target_peak_ = change.value;
-        } else if (change.name == "target-prim") {
-          applied_target_prim_ = change.value;
-        } else if (change.name == "target-trc") {
-          applied_target_trc_ = change.value;
-        } else if (change.name == "tone-mapping") {
-          applied_tone_mapping_ = change.value;
-        }
+        RecordAppliedOutputProperty(change.name, change.value);
       }
+      // A clean apply is the one outcome that leaves mpv exactly where the cache
+      // says, so it is what re-earns the short-circuit's trust after an unwind
+      // gave up halfway.
+      output_state_known_ = true;
     }
     // This request's own outcome, to this request's own caller. The result names
     // what mpv is actually in now, which is what decides whether the caller's

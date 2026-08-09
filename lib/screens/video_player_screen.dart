@@ -1460,8 +1460,16 @@ class VideoPlayerScreenState extends State<VideoPlayerScreen> with WidgetsBindin
           // on success. Storing that back keeps the sheet from offering "Player"
           // as the current mode while the plane tone-maps in the compositor,
           // a disagreement no later write would correct on its own.
+          // Contained on its own, for the same reason as the hdr-enabled block
+          // below: the refusal is deliberately tolerated, so a preference store
+          // that then throws must not turn "carry on with compositor tone
+          // mapping" into a failed player initialization.
           if (toneMapping != HdrToneMapping.compositor) {
-            await settingsService.write(SettingsService.hdrToneMapping, HdrToneMapping.compositor);
+            try {
+              await settingsService.write(SettingsService.hdrToneMapping, HdrToneMapping.compositor);
+            } catch (writeError) {
+              appLogger.w('VideoPlayerScreen: could not reconcile the stored tone-mapping mode', error: writeError);
+            }
           }
         }
       }
@@ -1471,14 +1479,20 @@ class VideoPlayerScreenState extends State<VideoPlayerScreen> with WidgetsBindin
       // when the compositor, the output and the source all agree, so pushing the
       // preference here is safe even when it cannot be honoured.
       //
-      // Linux swallows every refusal. The plugin only intercepts hdr-enabled once
-      // it can describe the plane; before then the write falls through to mpv as
-      // target-colorspace-hint=auto, and `auto` is only a legal value for that
-      // option from mpv 0.40. The deb/rpm/pacman packages link the distro's
-      // libmpv, which is older than that on every current LTS, so rethrowing here
-      // would turn "this session cannot do HDR" into "this session cannot play
-      // video" - the initialization error screen, with a Retry that fails the
-      // same way.
+      // Linux swallows every refusal, because on Linux a refusal is a statement
+      // about the *plane*, not about the media: HDR_UNSUPPORTED means this
+      // session's plane can never carry HDR - an 8-bit EGL config, or a
+      // compositor without the colour-management pieces - and a failed colour
+      // transaction means mpv would not take the output properties. Neither is a
+      // reason not to play the video in SDR, so rethrowing would turn "this
+      // session cannot do HDR" into "this session cannot play video": the
+      // initialization error screen, with a Retry that fails the same way.
+      //
+      // Two earlier reasons given here no longer hold and are recorded as gone
+      // so they are not reinstated: the packages no longer link a distro libmpv
+      // (each ships the pinned build), and the plugin intercepts hdr-enabled
+      // whenever a video surface exists, so the old fall-through to mpv's
+      // target-colorspace-hint - and its mpv 0.40 version floor - is unreachable.
       //
       // The tolerance is Linux-only rather than "every platform, for this one
       // error code". HDR_UNSUPPORTED is produced by the Linux plugin and nothing
@@ -1499,8 +1513,18 @@ class VideoPlayerScreenState extends State<VideoPlayerScreen> with WidgetsBindin
           // switch - which renders straight off this preference - from reading
           // on while the plane is SDR, a disagreement no later write corrects
           // because every internal re-apply reads the native side instead.
+          // Contained on its own. The refusal above is deliberately tolerated -
+          // this session simply plays SDR - so a preference store that then
+          // throws must not escalate that into the initialization error screen,
+          // which is where an escape from this catch lands. Worst case the
+          // preference stays out of step, which is the situation before this
+          // reconciliation existed.
           if (enableHDR) {
-            await settingsService.write(SettingsService.enableHDR, false);
+            try {
+              await settingsService.write(SettingsService.enableHDR, false);
+            } catch (writeError) {
+              appLogger.w('VideoPlayerScreen: could not reconcile the stored HDR preference', error: writeError);
+            }
           }
         }
       }

@@ -326,8 +326,44 @@ void TestRefusedForcedSdrReportsUnknown() {
   Check(outcome.result == MpvPlayer::HdrOutputResult::kUnknown, "an uncommandable core must report kUnknown");
   Check(outcome.error == MPV_ERROR_PROPERTY_ERROR, "the reported error must still be the original refusal");
   CheckApplied(
+      player, "auto", "bt.2020", "auto", "auto",
+      "a reset step that landed must be recorded, even though a later one was refused");
+}
+
+// Two mechanisms that are each correct alone and wrong together. A forced-SDR
+// reset refused on its *first* step records nothing, so the cache still names
+// the pre-request state - while mpv holds neither that nor SDR: the sequence's
+// own first write landed before it failed. The no-op short-circuit would then
+// find that stale cache matching the next identical request, report kApplied
+// without writing anything, and the plugin would commit a PQ image description
+// over pixels mpv is emitting as sRGB. That is a wrong picture with no error
+// anywhere, and it needs the two together, so neither one's tests can catch it.
+void TestAnUnknownOutputStateIsNeverAnsweredFromTheCache() {
+  ScriptedCore core;
+  MpvPlayer player;
+  core.Install(player);
+  ApplyPqBaseline(player, core);
+
+  core.RefuseWrite(2);  // tone-mapping, the request's own third write
+  core.RefuseWrite(3);  // the rollback of target-prim
+  core.RefuseWrite(4);  // the forced-SDR reset's first step, target-trc
+  Check(
+      Request(player, SourceTransfer::kSdr, 203).result == MpvPlayer::HdrOutputResult::kUnknown,
+      "the setup for this case is a reset refused before it recorded anything");
+  CheckApplied(
       player, "pq", "bt.2020", "auto", "auto",
-      "an unknown output state must not be recorded as any particular colour space");
+      "nothing landed after the refusal, so the cache still names the pre-request state");
+
+  // Exactly the request the baseline made, so the cache above matches it in all
+  // four values. mpv does not: target-trc is srgb, from the write that landed
+  // before the refusal. Refusing nothing this time isolates the gate - a skip
+  // here could only come from trusting the cache.
+  const size_t before = core.writes().size();
+  const Outcome outcome = Request(player, SourceTransfer::kPq, 0);
+
+  Check(core.writes().size() > before, "a request after an unknown output state must write, not skip");
+  Check(outcome.result == MpvPlayer::HdrOutputResult::kApplied, "the re-applied sequence must succeed");
+  CheckApplied(player, "pq", "bt.2020", "auto", "auto", "a clean apply must leave the cache naming what it wrote");
 }
 
 }  // namespace
@@ -353,6 +389,7 @@ int main() {
     mpv::TestRefusedStepUnwindsNewestFirstAndReportsRestored();
     mpv::TestRefusedRollbackForcesSdr();
     mpv::TestRefusedForcedSdrReportsUnknown();
+    mpv::TestAnUnknownOutputStateIsNeverAnsweredFromTheCache();
   } catch (const std::exception& error) {
     g_main_context_pop_thread_default(context);
     g_main_context_unref(context);

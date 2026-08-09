@@ -365,6 +365,10 @@ class MpvPlayer {
   /// failed. Reports `failure`, the original refusal, once mpv is settled.
   void ForceSdrOutput(size_t index, int failure, StatusCallback callback);
 
+  /// The single writer of the applied-output cache, so every path that moves one
+  /// of the four colour properties records it the same way.
+  void RecordAppliedOutputProperty(const std::string& name, const std::string& value);
+
   /// Runs the next queued HDR output request. One sequence at a time; the next
   /// starts only after the previous has finished, rollbacks included.
   void RunPendingHdrOutput();
@@ -406,6 +410,12 @@ class MpvPlayer {
   // do. It is applied and withdrawn again with the rest of the description,
   // whenever a tone-map pass starts or stops running.
   std::string applied_tone_mapping_ = "auto";
+  // Whether the four strings above still describe what mpv holds. False after a
+  // forced-SDR reset that was itself refused partway: some of it landed and some
+  // did not, so they record what was asked for rather than what is in force, and
+  // the no-op short-circuit must not answer from them. A clean apply, or a reset
+  // that completes, earns the trust back.
+  bool output_state_known_ = true;
   // What the unwinding of a refused sequence achieved. Reset to kRestored before
   // each sequence; the escalation path moves it to kForcedSdr or kUnknown, and
   // RunPendingHdrOutput reports whichever applies.
