@@ -232,6 +232,11 @@ class WaylandVideoSurface {
   bool InitEgl(std::string* error);
   void RequestParentCommit();
   void ClearFrameCallback();
+  /// Takes the current buffer off screen and drops any pending frame callback.
+  /// A subsurface has no visibility of its own, so this is what "not showing"
+  /// actually is - used both when Dart hides the plane and when the rect it was
+  /// covering goes away.
+  void DetachBuffer();
   // Destroys the description staged for the pending transition, if any. The
   // attached one is never held; see staged_description_.
   void ClearStagedDescription();

@@ -1104,7 +1104,15 @@ void WaylandVideoSurface::SetRect(int32_t x, int32_t y, int32_t width, int32_t h
   // layout - which Dart does send, ahead of the first real one - look like a
   // usable one-pixel plane, and has_size() means "there is a rect", not "the
   // numbers are non-zero".
+  const bool was_valid = rect_valid_;
   rect_valid_ = width > 0 && height > 0;
+  // Losing the rect has to take the pixels down, not just stop drawing new ones.
+  // render_video_plane skips a plane with no size, so without this the last
+  // frame stays on screen - and it stays *at its old geometry*, over whatever
+  // Flutter laid out in the space the video no longer occupies. A widget
+  // animating to zero height is the ordinary way in; hiding the plane is the
+  // separate call Dart does not have to make first.
+  if (was_valid && !rect_valid_) DetachBuffer();
 
   // Sized from the *origin* as well as the extent, so the plane covers the rect
   // on both edges once the origin is floored; PlaneBufferExtent explains why the
@@ -1159,16 +1167,24 @@ void WaylandVideoSurface::SetRect(int32_t x, int32_t y, int32_t width, int32_t h
   RequestParentCommit();
 }
 
+void WaylandVideoSurface::DetachBuffer() {
+  // The only way to take pixels off screen. Hiding the subsurface is not enough
+  // on its own: a subsurface has no visibility of its own, so what "hidden"
+  // means here is "carrying no buffer", and the content stays up until the
+  // compositor is told to drop it. The pending frame callback goes too - it
+  // would otherwise fire against a surface with nothing to present.
+  if (surface_ == nullptr) return;
+  ClearFrameCallback();
+  wl_surface_attach(surface_, nullptr, 0, 0);
+  wl_surface_commit(surface_);
+  buffer_attached_ = false;
+}
+
 void WaylandVideoSurface::SetVisible(bool visible) {
   if (visible == visible_) return;
   visible_ = visible;
   if (surface_ == nullptr) return;
-  if (!visible) {
-    ClearFrameCallback();
-    wl_surface_attach(surface_, nullptr, 0, 0);
-    wl_surface_commit(surface_);
-    buffer_attached_ = false;
-  }
+  if (!visible) DetachBuffer();
   // Becoming visible needs no action here: the next Present() attaches a buffer.
   RequestParentCommit();
 }
