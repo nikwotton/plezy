@@ -52,6 +52,12 @@ class ScriptedCore {
         });
   }
 
+  // Drops the substituted writer, which is what makes the player look like a
+  // core that can no longer be commanded: with no writer, the real
+  // disposed_/mpv_ check underneath decides, and a player that never opened a
+  // handle fails it.
+  void Uninstall(MpvPlayer& player) { player.ConfigurePropertyWritesForTesting(nullptr); }
+
   // Refuses the write that lands at |position| in the recorded stream, counting
   // from the last Forget().
   void RefuseWrite(size_t position) { refusals_.insert(position); }
@@ -401,6 +407,33 @@ void TestARefusalAfterAnUnknownStateIsNotReportedAsRestored() {
       "it must stay unknown, so the caller keeps the plane off screen rather than showing it undescribed");
 }
 
+// The third place a result is named: the early return taken when the core can no
+// longer be commanded at all. It owes the same answer as the other two, or a
+// request already queued when the core went away is answered kUnknown by the
+// drain while an identical one arriving a moment later hears kRestored - two
+// different claims about one output, decided by timing.
+void TestAnUncommandableCoreInheritsTheUnknownState() {
+  ScriptedCore core;
+  MpvPlayer player;
+  core.Install(player);
+  ApplyPqBaseline(player, core);
+
+  core.RefuseWrite(2);
+  core.RefuseWrite(3);
+  core.RefuseWrite(4);
+  Check(
+      Request(player, SourceTransfer::kSdr, 203).result == MpvPlayer::HdrOutputResult::kUnknown,
+      "the setup for this case is an output state that can no longer be named");
+
+  core.Uninstall(player);
+  const Outcome outcome = Request(player, SourceTransfer::kPq, 0);
+
+  Check(
+      outcome.result == MpvPlayer::HdrOutputResult::kUnknown,
+      "a core that cannot be commanded must not claim the unknown state was restored");
+  Check(outcome.error == MPV_ERROR_UNINITIALIZED, "the early return still reports why it could not run");
+}
+
 }  // namespace
 }  // namespace mpv
 
@@ -426,6 +459,7 @@ int main() {
     mpv::TestRefusedForcedSdrReportsUnknown();
     mpv::TestAnUnknownOutputStateIsNeverAnsweredFromTheCache();
     mpv::TestARefusalAfterAnUnknownStateIsNotReportedAsRestored();
+    mpv::TestAnUncommandableCoreInheritsTheUnknownState();
   } catch (const std::exception& error) {
     g_main_context_pop_thread_default(context);
     g_main_context_unref(context);

@@ -1262,7 +1262,14 @@ MpvPlayer::AppliedOutputColourSpace MpvPlayer::AppliedOutputColourSpaceForTestin
 
 void MpvPlayer::SetHdrOutput(SourceTransfer transfer, uint32_t target_peak_nits, HdrOutputCallback callback) {
   if (!CanCommandOutputProperties()) {
-    if (callback) callback(HdrOutputResult::kRestored, MPV_ERROR_UNINITIALIZED);
+    // The third place a result is named, and it owes the same honesty as the
+    // other two: nothing was touched, so the previous state stands - which is
+    // only worth saying when that state is nameable. Otherwise a request that
+    // was already queued when the core went away is answered kUnknown by the
+    // drain while an identical one arriving a moment later hears kRestored.
+    if (callback) {
+      callback(output_state_known_ ? HdrOutputResult::kRestored : HdrOutputResult::kUnknown, MPV_ERROR_UNINITIALIZED);
+    }
     return;
   }
   // Requests are serialized, and queued rather than coalesced.

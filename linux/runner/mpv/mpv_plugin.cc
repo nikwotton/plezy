@@ -449,7 +449,21 @@ static void apply_hdr_state(MpvPlugin* self, bool allow, mpv::HdrToneMapping mod
               // being hidden: those are different facts. Dart hides the plane
               // whenever the player is off screen, and reading that as "quarantined"
               // would restore visibility the user did not ask for.
-              const bool unquarantined = result != Result::kUnknown && self->hdr_output_unnameable;
+              //
+              // The commit is resolved first, because "mpv applied it" and "the
+              // surface is describing it" are two facts and the quarantine cares
+              // about the second. A kApplied whose non-zero token was refused is
+              // the case they part company: the watchdog withdrew the description
+              // while mpv was still answering, so mpv has moved to PQ and the
+              // surface has nothing attached. Lifting on that would publish the
+              // mislabelled frame the kUnknown arm below refuses to publish - and
+              // the same slow mpv causes both halves, so they arrive together.
+              // Short-circuit: only kApplied may commit; the other arms abort or
+              // withdraw instead.
+              const bool committed = result == Result::kApplied && self->video_surface->CommitHdrTransition(token);
+              const bool nameable =
+                  result != Result::kUnknown && (result != Result::kApplied || committed || token == 0);
+              const bool unquarantined = nameable && self->hdr_output_unnameable;
               if (unquarantined) {
                 self->hdr_output_unnameable = false;
                 if (self->visible != FALSE) self->video_surface->SetVisible(true);
@@ -457,7 +471,6 @@ static void apply_hdr_state(MpvPlugin* self, bool allow, mpv::HdrToneMapping mod
               switch (result) {
                 case Result::kApplied: {
                   // Pixels and state now agree; publish them together.
-                  const bool committed = self->video_surface->CommitHdrTransition(token);
                   if (committed || unquarantined) render_video_plane(self, TRUE);
                   if (committed && decision.describe) {
                     g_message(
