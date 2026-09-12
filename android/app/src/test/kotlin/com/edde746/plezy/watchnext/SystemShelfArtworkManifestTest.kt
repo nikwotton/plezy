@@ -1,5 +1,6 @@
 package com.edde746.plezy.watchnext
 
+import com.edde746.plezy.BuildConfig
 import java.io.File
 import javax.xml.parsers.DocumentBuilderFactory
 import org.junit.Assert.assertEquals
@@ -21,6 +22,11 @@ class SystemShelfArtworkManifestTest {
       "app/src/main/AndroidManifest.xml",
       "android/app/src/main/AndroidManifest.xml"
     )
+  }
+
+  @Test
+  fun artworkAuthorityMatchesInstalledApplicationId() {
+    assertEquals("${BuildConfig.APPLICATION_ID}.systemshelf.artwork", SystemShelfArtworkProvider.AUTHORITY)
   }
 
   @Test
